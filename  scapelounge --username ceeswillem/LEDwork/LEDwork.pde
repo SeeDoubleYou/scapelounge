@@ -29,7 +29,7 @@ void setup()
 
 void loop()
 {
-  //do stuff
+  //do stuff, or not
 }
 
 
