@@ -1,6 +1,11 @@
 #include <Streaming.h>
 
 // CONSTANTS
+#include "WProgram.h"
+void setup();
+void loop();
+void expressBehaviour();
+void expressBehavior_default();
 const char COMMAND_START  = 'STX';   // cannot be used in the command!!!
 const char COMMAND_END    = 'ETX';     // cannot be used in the command!!!
 
@@ -33,9 +38,9 @@ long greenStartTime = 0;
 void setup()
 {
   Serial.begin(9600);
-  setColorInterval(redStartTime, redInterval);
-  setColorInterval(blueStartTime, blueInterval);
-  setColorInterval(greenStartTime, greenInterval);
+  //setColorInterval(redStartTime, redInterval);
+  //setColorInterval(blueStartTime, blueInterval);
+  //ssetColorInterval(greenStartTime, greenInterval);
 }
 
 void loop()
@@ -45,7 +50,7 @@ void loop()
 
 void expressBehaviour()
 {
-  //setColorInterval(&redStartTime, &redInterval);
+  setColorInterval(redStartTime, redInterval);
   switch(state)
   {
     case STATE_DEFAULT:
@@ -61,16 +66,29 @@ void expressBehavior_default()
   }
 }
 
-/*void setColorInterval(long &startTime, int &interval, int minInterval, int maxInterval)
+void setColorInterval(long &startTime, int &interval, int minInterval, int maxInterval)
 {
   if((startTime == 0) || (currentTime - startTime >= interval))
   {
     interval = random(minInterval, maxInterval);
     startTime = currentTime;
   }
-}*/
+}
 
 void setColorInterval(long &startTime, int &interval)
 {
-  //setColorInterval(startTime, interval, 0, 10000);
+  setColorInterval(startTime, interval, 0, 10000);
 }
+
+int main(void)
+{
+	init();
+
+	setup();
+    
+	for (;;)
+		loop();
+        
+	return 0;
+}
+
