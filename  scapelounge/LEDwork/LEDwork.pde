@@ -1,5 +1,7 @@
 #include <Streaming.h>
 
+void setColorInterval(long &startTime, int &interval);
+
 // CONSTANTS
 const char COMMAND_START  = 'STX';   // cannot be used in the command!!!
 const char COMMAND_END    = 'ETX';     // cannot be used in the command!!!
@@ -29,6 +31,10 @@ int greenInterval = 0;
 long redStartTime   = 0;
 long blueStartTime  = 0;
 long greenStartTime = 0;
+
+//function prototypes (needed if function uses references)
+void setColorInterval(long &startTime, int &interval, int minInterval, int maxInterval);
+void setColorInterval(long &startTime, int &interval);
 
 void setup()
 {
@@ -61,16 +67,16 @@ void expressBehavior_default()
   }
 }
 
-/*void setColorInterval(long &startTime, int &interval, int minInterval, int maxInterval)
+void setColorInterval(long &startTime, int &interval, int minInterval, int maxInterval)
 {
   if((startTime == 0) || (currentTime - startTime >= interval))
   {
     interval = random(minInterval, maxInterval);
     startTime = currentTime;
   }
-}*/
+}
 
 void setColorInterval(long &startTime, int &interval)
 {
-  //setColorInterval(startTime, interval, 0, 10000);
+  setColorInterval(startTime, interval, 0, 10000);
 }
