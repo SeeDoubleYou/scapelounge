@@ -61,8 +61,6 @@ long messageReadTime = 0; // last time a message was read
 long modeChangeTime = 0; // last time the mode was changed
 char mode = MODE_DEFAULT; // the current mode
 boolean pulsing = true; // whether the leds should pulsate or blink
-int currentNode = 0; // the node the ledwork is listening to
-boolean allNodesRead = false;
 
 // values for the color in RGB
 float redValue   = 0;
@@ -77,13 +75,21 @@ int accValue_x;
 int accValue_y;
 int accValue_z;
 
-// commands to be saved. Command is build as followes: 0 => master/slave (0=slave, 1=master), 1 => red (value (0-255)), 2 => green, 3 => blue
-const int COMMAND_LENGTH = 4; // defined here for easy changing
+// info about the nodes
+int currentNode = 0; // the node the ledwork is listening to
+boolean nodesConnected[5] = {false, false, false, false};
+boolean skipToNextNode = false; //when a node isn't connected or read we can skip it and go to the next node
+int nrNodesConnected = 0;
+
+// commands to be saved.
+const int COMMAND_LENGTH = 6; // defined here for easy changing
 char COMMAND_node_1[COMMAND_LENGTH] = "";
 char COMMAND_node_2[COMMAND_LENGTH] = "";
 char COMMAND_node_3[COMMAND_LENGTH] = "";
 char COMMAND_node_4[COMMAND_LENGTH] = "";
+char *COMMAND_currentNode;
 char COMMAND_temp[COMMAND_LENGTH] = ""; // used to store the command before it is fully written
+char COMMAND_CALCULATED[COMMAND_LENGTH];
 
 int currentReadCommandIndex = -1; //used to keep track of the index of the read character;
 boolean commandRecieved = false; // whether the current read command is fully recieved
@@ -119,42 +125,6 @@ void loop()
   handleMessaging();
 }
 
-void setHSBIntervals()
-{
-  if(hueChangeStart == 0 || ((currentTime - hueChangeStart) >= hueInterval))
-  {
-    newHue();
-  }
-  if(brightnessChangeStart == 0 || ((currentTime - brightnessChangeStart) >= brightnessInterval))
-  {
-    newBrightness();
-  } 
-}
-
-void newHue()
-{
-  hueChangeStart = currentTime;
-  oldHue = currentHue;
-  planNewHue();
-  setNewHueInterval();
-}
-
-void newSaturation()
-{
-  saturationChangeStart = currentTime;
-  oldSaturation = currentSaturation;
-  planNewSaturation();
-  setNewSaturationInterval();
-}
-
-void newBrightness()
-{
-  brightnessChangeStart = currentTime;
-  oldBrightness = currentBrightness;
-  planNewBrightness();
-  setNewBrightnessInterval();
-}
-
 void setMode()
 {
   // set the mode if nessecery
@@ -162,6 +132,11 @@ void setMode()
   switch(mode)
   {
     case MODE_ATTACHED:
+		  if(nrNodesConnected == 0)
+			{
+				mode = MODE_DEFAULT;
+				hueRangeStart = random(0, 265);
+			}
       break;
     case MODE_MOVING:
       if(!isMoving() && currentTime - modeChangeTime > 2000)
@@ -220,9 +195,7 @@ void expressBehaviour()
   switch(mode)
   {
     case MODE_ATTACHED:
-      digitalWrite(PIN_LIGHT_RED, HIGH);
-      digitalWrite(PIN_LIGHT_GREEN, LOW);
-      digitalWrite(PIN_LIGHT_BLUE, LOW);
+      expressBehavior_attached();
       break;
     case MODE_MOVING:
       expressBehavior_moving();
@@ -245,118 +218,68 @@ void expressBehavior_moving()
   outPutMappedLightValues(false);
 }
 
-void handleMessaging()
+void expressBehavior_attached()
 {
-  // send a command every 100 ms
-  if(currentTime - messageSendTime >= 100)
-  {
-    sendMessage();
-  }
-  // read a node message very 200 ms 
-  // (!) check should be altered a bit: whenever a command is succesfully read, we should go on to the next node (if any),
-  //     if after, say 200 ms nothing is read, it is not connected. If the full command is not received after 200 ms,
-  //     we treat it as not being connected as well (or do we?)
-  if((messageReadTime == 0) || (currentTime - messageReadTime > 200))
-  {
-    messageReadTime = currentTime;
-    currentNode++;  // increase the nodenumber by 1
-    if(currentNode > 4)
-    {
-	  allNodesRead = true;
-      currentNode = 1; // reset the nodenumber to 1
-    } 
-    setReadCommandConditions();
-  }
-  readMessage();
+  if(nrNodesConnected > 1)
+	{
+		hueRangeStart = getAverageHueFromNodes();
+	}
+  setHSBIntervals();
+  outPutMappedLightValues(false);
 }
 
-void sendMessage()
+int getAverageHueFromNodes()
 {
-  // send the command
-  // the command is an array of bytes representing
-  // {COMMAND_START, NR_NODES, HUE, PULSING, COMMAND_END}
-  Serial << COMMAND_START << mode << COMMAND_END;
-  messageSendTime = currentTime;
+	int sumHue = 0;
+	int countHue = 0;
+	if(nodesConnected[1])
+	{
+		sumHue += (int)COMMAND_node_1[1];
+		countHue++;
+	}
+	return sumHue/countHue;
 }
 
-void readMessage()
+void setHSBIntervals()
 {
-  // if the serial is available, read the command and save it.
-  if(Serial.available())
+  if(hueChangeStart == 0 || ((currentTime - hueChangeStart) >= hueInterval))
   {
-    char readChar = (char)Serial.read();
-    switch(readChar)
-    {
-      case COMMAND_START:
-        currentReadCommandIndex = 0;
-        break;
-      case COMMAND_END:
-        if(currentReadCommandIndex != -1)
-        {
-          commandRecieved = true;
-          currentReadCommandIndex = -1;
-        }
-        break;
-      default:
-        if(currentReadCommandIndex != -1)
-        {
-          COMMAND_temp[currentReadCommandIndex++] = readChar;
-        }
-    }
+    newHue();
   }
-  if(commandRecieved)
+  if(brightnessChangeStart == 0 || ((currentTime - brightnessChangeStart) >= brightnessInterval))
   {
-    // copy the temporary command to the right array.
-    switch(currentNode)
-    {
-      case 1:
-        memcpy (COMMAND_temp,COMMAND_node_1,strlen(COMMAND_node_1)+1);
-        break;
-      case 2:
-        memcpy (COMMAND_temp,COMMAND_node_2,strlen(COMMAND_node_2)+1);
-        break;
-      case 3:
-        memcpy (COMMAND_temp,COMMAND_node_3,strlen(COMMAND_node_3)+1);
-        break;
-      case 4:
-        memcpy (COMMAND_temp,COMMAND_node_4,strlen(COMMAND_node_4)+1);
-        break;
-    }
-	commandRecieved = false;
-  }
+    newBrightness();
+  } 
 }
 
-void setReadCommandConditions()
+void newHue()
 {
-  // set conditions to read based on the current node
-  switch(currentNode)
-  {
-    case 1:
-      PIN_A_value = LOW;
-      PIN_B_value = LOW;
-      break;
-    case 2:
-      PIN_A_value = LOW;
-      PIN_B_value = HIGH;
-      break;
-    case 3:
-      PIN_A_value = HIGH;
-      PIN_B_value = LOW;
-      break;
-    case 4:
-      PIN_A_value = HIGH;
-      PIN_B_value = HIGH;
-      break;
-  }
-  currentReadCommandIndex = -1;
-  digitalWrite(PIN_A, PIN_A_value);
-  digitalWrite(PIN_B, PIN_B_value);
+  hueChangeStart = currentTime;
+  oldHue = currentHue;
+  planNewHue();
+  setNewHueInterval();
+}
+
+void newSaturation()
+{
+  saturationChangeStart = currentTime;
+  oldSaturation = currentSaturation;
+  planNewSaturation();
+  setNewSaturationInterval();
+}
+
+void newBrightness()
+{
+  brightnessChangeStart = currentTime;
+  oldBrightness = currentBrightness;
+  planNewBrightness();
+  setNewBrightnessInterval();
 }
 
 void planNewHue()
 {
   plannedHue = random(hueRangeStart, hueRangeStart + hueRangeLength);
-  // THE HUE CAN BECOME > 360 BUT THIS IS OK FOR CALCULATION. ONLY IN setRGBFromCurrentHSB IT WILL BE NORMALIZED
+  // THE HUE CAN BECOME > 255 BUT THIS IS OK FOR CALCULATION. ONLY IN setRGBFromCurrentHSB IT WILL BE NORMALIZED
 }
 
 void planNewSaturation()
@@ -371,7 +294,7 @@ void planNewBrightness()
 
 void setNewHueInterval()
 {
-  hueInterval = ceil(random(hueIntervalMin, hueIntervalMax)); 
+  hueInterval = ceil(random(hueIntervalMin, hueIntervalMax)); //TODO: is trhe ceil really necessary?
 }
 
 void setNewSaturationInterval()
@@ -412,6 +335,128 @@ void setRGBFromCurrentHSB()
   }
 }
 
+void handleMessaging()
+{
+  // send a command every 100 ms
+  if(currentTime - messageSendTime >= 100)
+  {
+    sendMessage();
+  }
+  // read a node message very 200 ms or when skipToNextNode == true
+  if(skipToNextNode || ((messageReadTime == 0) || (currentTime - messageReadTime > 200)))
+  {
+    // if we haven't read a command in previous step, that nodes wasn't connected (at least not good enough)
+	if(!commandRecieved)
+	{
+		nodesConnected[currentNode-1] = false;
+	}
+	commandRecieved = false; // reset
+	skipToNextNode = false; // reset
+    messageReadTime = currentTime;
+    currentNode++;  // increase the nodenumber by 1
+    if(currentNode > 4)
+    {
+			// we have been past all the nodes
+			updateNrNodesConnected();
+			if(nrNodesConnected > 0)
+			{
+				mode = MODE_ATTACHED;
+			}
+      currentNode = 1; // reset the nodenumber to 1
+    } 
+    setReadCommandConditions();
+  }
+  readMessage();
+}
+
+void sendMessage()
+{
+  // send the command
+	calculateCommand();
+  Serial << COMMAND_CALCULATED;
+  messageSendTime = currentTime;
+}
+
+void calculateCommand()
+{
+	// the command is an array of bytes representing:
+  // {COMMAND_START, NR_NODES, HUE, PULSING, COMMAND_END}
+  COMMAND_CALCULATED[0] = COMMAND_START;
+	COMMAND_CALCULATED[1] = (char)nrNodesConnected;
+	COMMAND_CALCULATED[2] = (char)currentHue;
+	COMMAND_CALCULATED[3] = (char)pulsing;
+	COMMAND_CALCULATED[4] = COMMAND_END;
+}
+
+void readMessage()
+{
+  // if the serial is available, read the command and save it.
+  if(Serial.available())
+  {
+    char readChar = (char)Serial.read(); // read a single character from serial
+    switch(readChar)
+    {
+      case COMMAND_START:
+        currentReadCommandIndex = 0;
+        break;
+      case COMMAND_END:
+        if(currentReadCommandIndex != -1)
+        {
+          commandRecieved = true;
+          currentReadCommandIndex = -1;
+        }
+        break;
+      default:
+        if(currentReadCommandIndex != -1)
+        {
+          COMMAND_temp[currentReadCommandIndex++] = readChar; //save the read character to a temorary string
+        }
+    }
+  }
+  else
+  {
+    skipToNextNode = true; // no serial available on this node, skip to next one
+  }
+  if(commandRecieved)
+  {
+    // we have recieved a full command, copy the temporary command to the right array.
+    copyString(COMMAND_temp,COMMAND_currentNode);
+		nodesConnected[currentNode-1] = true; // the currentNode is connected and we have its command
+		skipToNextNode = true; // skip to the next node
+  }
+}
+
+void setReadCommandConditions()
+{
+  // set conditions to read based on the current node
+  switch(currentNode)
+  {
+    case 1:
+	  COMMAND_currentNode = (char*)&COMMAND_node_1; // set the pointer COMMAND_currentNode to point to the right array
+      PIN_A_value = LOW;
+      PIN_B_value = LOW;
+      break;
+    case 2:
+	  COMMAND_currentNode = (char*)&COMMAND_node_2;
+      PIN_A_value = LOW;
+      PIN_B_value = HIGH;
+      break;
+    case 3:
+	  COMMAND_currentNode = (char*)&COMMAND_node_3;
+      PIN_A_value = HIGH;
+      PIN_B_value = LOW;
+      break;
+    case 4:
+	  COMMAND_currentNode = (char*)&COMMAND_node_4;
+      PIN_A_value = HIGH;
+      PIN_B_value = HIGH;
+      break;
+  }
+  currentReadCommandIndex = -1; // reset
+  digitalWrite(PIN_A, PIN_A_value);
+  digitalWrite(PIN_B, PIN_B_value);
+}
+
 void outPutMappedLightValues(boolean fade)
 {
   currentHue = getMappedValueIntervalBased(hueChangeStart, hueInterval, fade, plannedHue, oldHue);
@@ -425,9 +470,21 @@ void outPutMappedLightValues(boolean fade)
 
 void outputMappedLightValue(int outputPin, float mappedValue)
 {
-  // Convert the input value to a value between 0 and 255 and write it
+  // Convert the input value to a value between 0 and 255 and write it to the pin
   int outputValue = constrain(round(mappedValue * 255),  0, 255);
   analogWrite(outputPin, outputValue);
+}
+
+void updateNrNodesConnected()
+{
+	nrNodesConnected = 0;
+	for(int i = 0; i <= 4; i++)
+	{
+		if(nodesConnected[i])
+		{
+			nrNodesConnected++;
+		}
+	}
 }
 
 //---------------------------------------------------------------------------------------------------------------------------
@@ -442,6 +499,11 @@ float getMappedValueIntervalBased(float startTime, int interval, boolean fade, f
 float mapFloat(float x, float in_min, float in_max, float out_min, float out_max)
 {
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+void copyString(char *source, char *destination)
+{
+	memcpy (source,destination,strlen(destination)+1);
 }
 
 uint32_t deadbeef_rand()
