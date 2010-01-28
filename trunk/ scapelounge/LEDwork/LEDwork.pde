@@ -16,9 +16,11 @@ const char COMMAND_START  = 2; // 'STX'
 const char COMMAND_END    = 3; // 'ETX'
 
 // modes, 3 modes for general behaviours.
-const char MODE_DEFAULT  = 'A'; // when the ledwork is not attached to anything and is laying still
-const char MODE_MOVING   = 'B'; // moving while not attached to anything
-const char MODE_ATTACHED = 'C'; // attached to other ledworks and/or panels
+const char MODE_DEFAULT     = 'A'; // when the ledwork is not attached to anything and is laying still
+const char MODE_MOVING      = 'B'; // moving while not attached to anything
+const char MODE_ATTACHED    = 'C'; // attached to other ledworks and/or panels
+const char MODE_HEAVYMOVING = 'D'; // moving a lot
+const char MODE_TURNHUE     = 'E'; // turn the ledwork to set the hue
 
 // constants for the colors that the ledwork can use easily to read values in switches
 const int RED = 0;
@@ -33,7 +35,7 @@ int PIN_B_value = LOW;
 // variables used in HSB calculation
 float hueRangeStart; // hue has a range that the ledwork can use to create it's color
 int hueRangeLength; // defines the size of the range
-float oldHue = 0; // old value is stored to compute the current hue based on an interval, same for saturatoin and brightness
+float oldHue = 0; // old value is stored to compute the current hue based on an interval, same for saturation and brightness
 float oldSaturation;
 float oldBrightness;
 float currentHue; // the current hue of the ledwork, set in setup
@@ -41,7 +43,11 @@ float currentSaturation; // set here since at the moment it will not change duri
 float currentBrightness;
 float plannedHue = 0; // if the ledwork is going from one you to the other, this is the hue it will persue
 float plannedSaturation = 0;
+float plannedSaturationMin;
+float plannedSaturationMax;
 float plannedBrightness = 0;
+float plannedBrightnessMin; // set a max and a min for brightness, this can be used for power saving when running on battery power
+float plannedBrightnessMax;
 long hueChangeStart = 0; // the time that the ledwork started to go to a new hue
 long saturationChangeStart = 0;
 long brightnessChangeStart = 0;
@@ -55,12 +61,18 @@ int brightnessInterval;
 int brightnessIntervalMin;
 int brightnessIntervalMax;
 
+// time variables
 long currentTime = 0; // the number of milliseconds sinds the program was started (will reset to 0 after about 50 days)
 long messageSendTime = 0; // last time a message was send
 long messageReadTime = 0; // last time a message was read
 long modeChangeTime = 0; // last time the mode was changed
+long lastMovingTime = 0; // last time the ledwork has moved
+long lastHeavyMovingTime = 0; // last time the ledwork has moved heavily
+long lastHueChangeByTurnTime = 0; // last time the hue was changed by turning the ledwork
+
+// mode settings
 char mode = MODE_DEFAULT; // the current mode
-boolean pulsing = true; // whether the leds should pulsate or blink
+bool pulsing = true; // whether the leds should pulsate or blink
 
 // values for the color in RGB
 float redValue   = 0;
@@ -68,21 +80,27 @@ float greenValue = 0;
 float blueValue  = 0;
 
 // accelerometer, initial value (to check against) and constantly updated values
-int accInitValue_x;
-int accInitValue_y;
-int accInitValue_z;
 int accValue_x;
 int accValue_y;
 int accValue_z;
+int accXList[6]; // lists containing the last read values (must have the same length)
+int accYList[6];
+int accZList[6];
+int accListLength = 5; // must be one less than the length of the defined lists
+int accListIndex = 0; // the index in the list (used when updating the list)
+int accXavarage;
+int accYavarage;
+int accZavarage;
+bool accInitialized = false;
 
 // info about the nodes
 int currentNode = 0; // the node the ledwork is listening to
-boolean nodesConnected[5] = {false, false, false, false}; // array with a boolean for each node whether it is connected (0 = node 1)
-boolean skipToNextNode = false; //when a node isn't connected or read the ledwork can skip it and go to the next node
+bool nodesConnected[5] = {false, false, false, false}; // array with a bool for each node whether it is connected (0 = node 1)
+bool skipToNextNode = false; //when a node isn't connected or read the ledwork can skip it and go to the next node
 int nrNodesConnected = 0; // the number of nodes that the ledwork is curently connected to
 
 // commands to be saved.
-const int COMMAND_LENGTH = 3; // defined here for easy changing
+const int COMMAND_LENGTH = 5; // defined here for easy changing
 char COMMAND_node_1[COMMAND_LENGTH] = ""; // command recieved from node 1
 char COMMAND_node_2[COMMAND_LENGTH] = ""; // command recieved from node 2
 char COMMAND_node_3[COMMAND_LENGTH] = ""; // command recieved from node 3
@@ -92,10 +110,10 @@ char COMMAND_temp[COMMAND_LENGTH] = ""; // used to store the command before it i
 char COMMAND_CALCULATED[COMMAND_LENGTH]; // the command the ledwork will send to the nodes
 
 int currentReadCommandIndex = -1; //used to keep track of the index of the read character;
-boolean commandRecieved = false; // whether the current read command is fully recieved
+bool commandRecieved = false; // whether the current read command is fully recieved
 
 // DEBUGVALUES
-boolean inDebugMode = false;
+bool inDebugMode = false;
 long debugTime = 0;
 int debugInterval = 250;
 
@@ -111,13 +129,6 @@ void setup()
   setNewModeConditions(); // so set the intervals
 }
 
-void resetAccInitValues()
-{
-  accInitValue_x = analogRead(PIN_ACC_X); // set the initial values for the accelerometer by reading the pins
-  accInitValue_y = analogRead(PIN_ACC_Y);
-  accInitValue_z = analogRead(PIN_ACC_Z);
-}
-
 void setColorDomain()
 {
   // since the default random number generator sucks monkey balls the ledwork use deadbeef to create good random seed.
@@ -129,6 +140,7 @@ void setColorDomain()
 void loop()
 {
   currentTime = millis(); // update the current time
+  updateAcc(); // update the accelerometer values
   setMode(); // set the mode (it might have changed)
   expressBehaviour(); // express a behaviour based on environment
   handleMessaging(); // exchanges messages with the nodes
@@ -145,8 +157,66 @@ void debug()
 	  debugTime = currentTime;
 		//Serial << "pH: " << plannedHue << " pS: " << plannedSaturation << " pB: " << plannedBrightness << " H: " << currentHue << " S: " << currentSaturation << " V: " << currentBrightness << " R: " << redValue << " G: " << greenValue << " B: " << blueValue << "\n";
 		//Serial << "oH: " << oldHue << " pH: " << plannedHue << " cH: " << currentHue << "\n";
-		//Serial << "m=" << mode << " n=" << nrNodesConnected << " c" << currentNode << "=" << COMMANDS[currentNode-1] << "\n";
+		Serial << "m=" << mode << " n=" << nrNodesConnected << " c" << currentNode << "=" << COMMANDS[currentNode-1] << "\n";
 	}
+	Serial << "x: " << accXavarage << "-" << accValue_x << "\t y:" << accYavarage << "-" << accValue_y <<  "\t z:" << accZavarage << "-" << accValue_z << "\n";
+}
+
+
+void updateAcc()
+{
+  accValue_x = analogRead(PIN_ACC_X);
+  accValue_y = analogRead(PIN_ACC_Y);
+  accValue_z = analogRead(PIN_ACC_Z);
+  accXList[accListIndex]   = accValue_x;
+  accYList[accListIndex]   = accValue_y;
+  accZList[accListIndex++] = accValue_z;
+  if(accListIndex == accListLength) 
+  {
+    accListIndex = 0; 
+    accInitialized = true; 
+  }
+  int accXSum = 0;
+  int accYSum = 0;
+  int accZSum = 0;
+  for(int i=0; i<accListLength; i++)
+  {
+    accXSum += accXList[i];
+    accYSum += accYList[i];
+    accZSum += accZList[i];
+  }
+  accXavarage = accXSum/accListLength;
+  accYavarage = accYSum/accListLength;
+  accZavarage = accZSum/accListLength;
+}
+
+bool isMoving(int difference)
+{
+  bool moving = false;
+  if(accInitialized)
+  {
+    moving = abs(accXavarage - accValue_x) > difference || abs(accYavarage - accValue_y) > difference || abs(accZavarage - accValue_z) > difference;
+  }
+  if(moving)
+  {
+    lastMovingTime = currentTime;
+  }
+  return moving;
+}
+
+bool isMoving()
+{
+  return isMoving(4);
+}
+
+bool isHeavyMoving()
+{
+  bool moving = isMoving(6);
+  if(moving)
+  {
+    lastHeavyMovingTime = currentTime;
+  }
+  return moving;
 }
 
 void setMode()
@@ -168,23 +238,22 @@ void setMode()
 			  }
         break;
       case MODE_MOVING:
-        //if(!isMoving() && currentTime - modeChangeTime > 2000)
-        if(currentTime - modeChangeTime > 5000)
+      case MODE_HEAVYMOVING:
+        if(!isMoving() && currentTime - lastMovingTime > 2000)
         {
 				  // the ledwork stopt moving and it has been more than two seconds since it started moving, return to defaultmode
           mode = MODE_DEFAULT;
         }
         break;
+      case MODE_TURNHUE:
+        break;
       case MODE_DEFAULT:
       default:
-			  // check the accelerometer values
-        accValue_x = analogRead(PIN_ACC_X);
-        accValue_y = analogRead(PIN_ACC_Y);
-        accValue_z = analogRead(PIN_ACC_Z);
         if(isMoving())
         {
-          //mode = MODE_MOVING; 
+          mode = MODE_MOVING; 
         }
+        break;
     } 
   }
   if(oldMode != mode)
@@ -195,18 +264,16 @@ void setMode()
   }
 }
 
-boolean isMoving()
-{
-  // @TODO: the check on movement could be radicaly improved. Better would be to keep track of an avarage. Do testing with an accelerometer to see output.
-  return abs(accInitValue_x - accValue_x) > 25 || abs(accInitValue_y - accValue_y) > 25 || abs(accInitValue_z - accValue_z) > 25;
-}
-
 void setNewModeConditions()
 {
 	//after a mode has changed some variables have to be adapted to fit the mode
   switch(mode)
   {
     case MODE_ATTACHED:
+      plannedSaturationMin = 150;
+      plannedSaturationMax = 255;
+      plannedBrightnessMin = 150;
+      plannedBrightnessMax = 255;
       hueRangeLength = 10;
       hueIntervalMin = 100;
       hueIntervalMax = 2000;
@@ -216,8 +283,14 @@ void setNewModeConditions()
       brightnessIntervalMax = 2000;
       pulsing = true;
       break;
+    case MODE_HEAVYMOVING:
+      break;  
     case MODE_MOVING:
-      setColorDomain(); // pick a new color domain (keep things random)
+      //setColorDomain(); // pick a new color domain (keep things random)
+      plannedSaturationMin = 150;
+      plannedSaturationMax = 255;
+      plannedBrightnessMin = 150;
+      plannedBrightnessMax = 255;
       hueIntervalMin = 100;
       hueIntervalMax = 500;
 			saturationIntervalMin = 100;
@@ -226,10 +299,16 @@ void setNewModeConditions()
       brightnessIntervalMax = 500;
       pulsing = true;
       break;
+    case MODE_TURNHUE:
+      lastHueChangeByTurnTime = currentTime;
+      break;
     case MODE_DEFAULT:
     default:
       setColorDomain(); // pick a color domain in HSB
-      resetAccInitValues();
+      plannedSaturationMin = 150;
+      plannedSaturationMax = 255;
+      plannedBrightnessMin = 150;
+      plannedBrightnessMax = 255;
       hueRangeLength = 80;
       hueIntervalMin = 1000;
       hueIntervalMax = 10000;
@@ -237,40 +316,51 @@ void setNewModeConditions()
       saturationIntervalMax = 5000;
       brightnessIntervalMin = 2000;
       brightnessIntervalMax = 5000;
+      saturationChangeStart = 0;
+      brightnessChangeStart = 0;
       pulsing = true;
   } 
 }
 
 void expressBehaviour()
 {
-  pinMode(7, OUTPUT);
-  pinMode(6, OUTPUT);
-  pinMode(5, OUTPUT);
   switch(mode)
   {
     case MODE_ATTACHED:
-      digitalWrite(7, LOW);
-      digitalWrite(6, LOW);
-      digitalWrite(5, HIGH);
       expressBehavior_attached();
       break;
     case MODE_MOVING:
-      digitalWrite(7, LOW);
-      digitalWrite(6, HIGH);
-      digitalWrite(5, LOW);
       expressBehavior_moving();
+      break;
+    case MODE_HEAVYMOVING:
+      expressBehavior_heavymoving();
+      break;
+    case MODE_TURNHUE:
+      expressBehaviour_turnhue();
       break;
     case MODE_DEFAULT:
     default:
-      digitalWrite(7, HIGH);
-      digitalWrite(6, LOW);
-      digitalWrite(5, LOW);
       expressBehavior_default();
   } 
 }
 
 void expressBehavior_default()
 {
+  if(currentTime - modeChangeTime > 5000)
+  { 
+    plannedBrightnessMin = 100;
+    plannedBrightnessMax = 200;
+  }
+  if(currentTime - modeChangeTime > 10000)
+  { 
+    plannedBrightnessMin = 50;
+    plannedBrightnessMax = 150;
+  }
+  if(currentTime - modeChangeTime > 20000)
+  { 
+    plannedBrightnessMin = 10;
+    plannedBrightnessMax = 50;
+  }
   setHSBIntervals();
   updateHSB();
   outPutMappedLightValues();
@@ -278,27 +368,85 @@ void expressBehavior_default()
 
 void expressBehavior_moving()
 {
-  //if(currentTime - modeChangeTime > 2000)
-  //{
-    currentBrightness = 1;
-    currentSaturation = 0;
-  //}
-  //else
-  //{
-  //  setHSBIntervals();
-  //  updateHSB();
-  // }
+  if((currentTime - modeChangeTime) > 500 && isHeavyMoving())
+  {
+    mode = MODE_HEAVYMOVING;
+    modeChangeTime = currentTime;
+  }
+  setHSBIntervals();
+  updateHSB(); 
+  currentBrightness = 255;
+  currentSaturation = 0;
+  outPutMappedLightValues();
+}
+
+void expressBehavior_heavymoving()
+{
+  if(!isHeavyMoving() && (currentTime - lastHeavyMovingTime) > 100)
+  {
+    mode = MODE_MOVING;
+    modeChangeTime = currentTime;
+  }
+  else if((currentTime - modeChangeTime) > 4100)
+  {
+    mode = MODE_TURNHUE;
+    modeChangeTime = currentTime;
+    setNewModeConditions();
+  }
+  else if((currentTime - modeChangeTime) > 4000)
+  {
+    digitalWrite(PIN_LIGHT_RED,   HIGH);
+    digitalWrite(PIN_LIGHT_GREEN, HIGH);
+    digitalWrite(PIN_LIGHT_BLUE,  HIGH);
+  }
+  else if((currentTime - modeChangeTime) > 3000)
+  {
+    digitalWrite(PIN_LIGHT_RED,   HIGH);
+    digitalWrite(PIN_LIGHT_GREEN, LOW);
+    digitalWrite(PIN_LIGHT_BLUE,  LOW);
+  }
+  else if((currentTime - modeChangeTime) > 2000)
+  {
+    digitalWrite(PIN_LIGHT_RED,   LOW);
+    digitalWrite(PIN_LIGHT_GREEN, HIGH);
+    digitalWrite(PIN_LIGHT_BLUE,  LOW);
+  }
+  else if((currentTime - modeChangeTime) > 1000)
+  {
+    digitalWrite(PIN_LIGHT_RED,   LOW);
+    digitalWrite(PIN_LIGHT_GREEN, LOW);
+    digitalWrite(PIN_LIGHT_BLUE,  HIGH);
+  }
+}
+
+void expressBehaviour_turnhue()
+{
+  float checkHue = currentHue;
+  if(currentTime - lastHueChangeByTurnTime < 5000)
+  {
+    //mode = MODE_DEFAULT;
+    //modeChangeTime = currentTime;
+    currentHue        = plannedHue        = oldHue        = map(accXavarage, 410, 690, 0, 255);
+    currentSaturation = plannedSaturation = oldSaturation = 255;
+    currentBrightness = plannedBrightness = oldBrightness = 255;
+    hueRangeStart = currentHue - (hueRangeLength/2);
+    hueChangeStart = saturationChangeStart = brightnessChangeStart = 0;
+  }
+  if(abs(checkHue - currentHue) > 2)
+  {
+    lastHueChangeByTurnTime = currentTime;
+  }
   outPutMappedLightValues();
 }
 
 void expressBehavior_attached()
 {
-  boolean notComfi;
+  bool notComfi; // @TODO:  will this work as expected? it is set to null in every loop...
   if((currentTime - modeChangeTime) < 500)
   {
     setHSBIntervals();
     updateHSB(); 
-    currentBrightness = 1;
+    currentBrightness = 255;
     currentSaturation = 0;
     notComfi = true;
   }
@@ -318,7 +466,7 @@ void expressBehavior_attached()
   outPutMappedLightValues();
 }
 
-int getAverageHueFromNodes(boolean includeSelf)
+int getAverageHueFromNodes(bool includeSelf)
 {
   int sumHue = 0;
   int countHue = 0;
@@ -385,18 +533,19 @@ void newBrightness()
 
 void planNewHue()
 {
-  plannedHue = random(hueRangeStart, hueRangeStart + hueRangeLength);
+  float hueRangeEnd = hueRangeStart + hueRangeLength;
+  plannedHue = random(hueRangeStart, hueRangeEnd);
   // THE HUE CAN BECOME > 255 BUT THIS IS OK FOR CALCULATION. ONLY IN setRGBFromCurrentHSB IT WILL BE NORMALIZED
 }
 
 void planNewSaturation()
 {
-  plannedSaturation = 1; //(float)(random(0, 100) / 100);
+  plannedSaturation = (float)(random(plannedSaturationMin, plannedSaturationMax));
 }
 
 void planNewBrightness()
 {
-  plannedBrightness = 0.5 + (float)(random(0, 100) / 200);
+  plannedBrightness = (float)random(plannedBrightnessMin, plannedBrightnessMax);
 }
 
 void setNewHueInterval()
@@ -416,29 +565,30 @@ void setNewBrightnessInterval()
 
 void setRGBFromCurrentHSB()
 {
-  if(currentSaturation == 0)
+  float hue = currentHue;
+  float saturation = (float)(currentSaturation/255);
+  float brightness = (float)(currentBrightness/255);
+  if(saturation == 0)
   {
-     redValue = greenValue = blueValue = currentBrightness;
+     redValue = greenValue = blueValue = brightness;
   }
   else
   {
-     //float hue = ((currentHue % 256)/255) * 6; // arduino can't do modulo on floats (facepalm), so instead the ledwork needs the folowing three lines
-		float hue = currentHue;
 		while(hue > 255) { hue -= 255; }
 		hue = (hue/255)*6;
 	 
     if(hue == 6) { hue = 0; }
     int var_i = floor( hue );    
-    float var_1 = currentBrightness * ( 1 - currentSaturation );
-    float var_2 = currentBrightness * ( 1 - currentSaturation * ( hue - var_i ) );
-    float var_3 = currentBrightness * ( 1 - currentSaturation * ( 1 - ( hue - var_i ) ) );
+    float var_1 = brightness * ( 1 - saturation );
+    float var_2 = brightness * ( 1 - saturation * ( hue - var_i ) );
+    float var_3 = brightness * ( 1 - saturation * ( 1 - ( hue - var_i ) ) );
   
-    if      ( var_i == 0 ) { redValue = currentBrightness; greenValue = var_3;             blueValue = var_1; }
-    else if ( var_i == 1 ) { redValue = var_2;             greenValue = currentBrightness; blueValue = var_1; }
-    else if ( var_i == 2 ) { redValue = var_1;             greenValue = currentBrightness; blueValue = var_3; }
-    else if ( var_i == 3 ) { redValue = var_1;             greenValue = var_2;             blueValue = currentBrightness; }
-    else if ( var_i == 4 ) { redValue = var_3;             greenValue = var_1;             blueValue = currentBrightness; }
-    else                   { redValue = currentBrightness; greenValue = var_1;             blueValue = var_2; }
+    if      ( var_i == 0 ) { redValue = brightness; greenValue = var_3;      blueValue = var_1; }
+    else if ( var_i == 1 ) { redValue = var_2;      greenValue = brightness; blueValue = var_1; }
+    else if ( var_i == 2 ) { redValue = var_1;      greenValue = brightness; blueValue = var_3; }
+    else if ( var_i == 3 ) { redValue = var_1;      greenValue = var_2;      blueValue = brightness; }
+    else if ( var_i == 4 ) { redValue = var_3;      greenValue = var_1;      blueValue = brightness; }
+    else                   { redValue = brightness; greenValue = var_1;      blueValue = var_2; }
   }
 }
 
@@ -483,7 +633,10 @@ void sendMessage()
 
 void calculateCommand()
 {
-  char command[COMMAND_LENGTH] = {(char)makeCommandCharValid(currentHue), (char)(nrNodesConnected + 4)};
+  char command[COMMAND_LENGTH] = {(char)makeCommandCharValid(currentHue), 
+                                  (char)makeCommandCharValid(currentSaturation), 
+                                  (char)makeCommandCharValid(currentBrightness),  
+                                  (char)(nrNodesConnected + 4)};
 	strcpy(COMMAND_CALCULATED, command);
 }
 
@@ -602,7 +755,7 @@ void updateNrNodesConnected()
 //---------------------------------------------------------------------------------------------------------------------------
 // helper functions
 
-float getMappedValueIntervalBased(float startTime, int interval, boolean fade, float minValue, float maxValue)
+float getMappedValueIntervalBased(float startTime, int interval, bool fade, float minValue, float maxValue)
 {
   float currentStep = (currentTime - startTime) / interval;
   return fade ? mapFloat(currentStep, 0, 1, maxValue, minValue) : (currentStep > 0.5 ? HIGH : LOW);
