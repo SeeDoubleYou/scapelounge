@@ -2,7 +2,7 @@
 
 // ---- CONSTANTS ----
 // types
-bool networkNode = true; // when set as a networknode ignore movement at all time since they have no accelorometer
+bool networkNode = false; // when set as a networknode ignore movement at all time since they have no accelorometer
 
 // pins
 const int PIN_A = networkNode ? 2 : 12; // PIN_A and PIN_B are used to set the multiplexer
