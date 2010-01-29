@@ -1,9 +1,12 @@
 #include <Streaming.h>
 
 // ---- CONSTANTS ----
+// types
+bool networkNode = true; // when set as a networknode ignore movement at all time since they have no accelorometer
+
 // pins
-const int PIN_A = 12; // PIN_A and PIN_B are used to set the multiplexer
-const int PIN_B = 13;
+const int PIN_A = networkNode ? 2 : 12; // PIN_A and PIN_B are used to set the multiplexer
+const int PIN_B = networkNode ? 4 : 13;
 const int PIN_LIGHT_RED   = 10; // ledpins
 const int PIN_LIGHT_GREEN = 9;
 const int PIN_LIGHT_BLUE  = 11;
@@ -68,11 +71,16 @@ long messageReadTime = 0; // last time a message was read
 long modeChangeTime = 0; // last time the mode was changed
 long lastMovingTime = 0; // last time the ledwork has moved
 long lastHeavyMovingTime = 0; // last time the ledwork has moved heavily
+long lastStopMovingTime = 0; // last time the ledwork stopped moving
+long lastStopHeavyMovingTime = 0; // last time the ledwork stopped moving heavily
 long lastHueChangeByTurnTime = 0; // last time the hue was changed by turning the ledwork
+long endOfTurnHue = 0; // used in checks when the ledworks returrn from turnHue mode
 
 // mode settings
 char mode = MODE_DEFAULT; // the current mode
 bool pulsing = true; // whether the leds should pulsate or blink
+bool modeFreeze = false; // when set to true the mode can not be altered
+bool comfortablyAttached; // after a connection with onother ledwork persist for a certain amount of time this will be set to true 
 
 // values for the color in RGB
 float redValue   = 0;
@@ -86,7 +94,7 @@ int accValue_z;
 int accXList[6]; // lists containing the last read values (must have the same length)
 int accYList[6];
 int accZList[6];
-int accListLength = 5; // must be one less than the length of the defined lists
+int accListLength = 5; // must be one less than the length of the defined lists above
 int accListIndex = 0; // the index in the list (used when updating the list)
 int accXavarage;
 int accYavarage;
@@ -100,7 +108,7 @@ bool skipToNextNode = false; //when a node isn't connected or read the ledwork c
 int nrNodesConnected = 0; // the number of nodes that the ledwork is curently connected to
 
 // commands to be saved.
-const int COMMAND_LENGTH = 5; // defined here for easy changing
+const int COMMAND_LENGTH = 2; // defined here for easy changing
 char COMMAND_node_1[COMMAND_LENGTH] = ""; // command recieved from node 1
 char COMMAND_node_2[COMMAND_LENGTH] = ""; // command recieved from node 2
 char COMMAND_node_3[COMMAND_LENGTH] = ""; // command recieved from node 3
@@ -127,6 +135,7 @@ void setup()
   pinMode(PIN_A, OUTPUT); // PIN_A and PIN_B must be set as output to make sure that it will be set to 0 or 1 at all time
   pinMode(PIN_B, OUTPUT);
   setNewModeConditions(); // so set the intervals
+  setColorDomain();
 }
 
 void setColorDomain()
@@ -141,7 +150,10 @@ void loop()
 {
   currentTime = millis(); // update the current time
   updateAcc(); // update the accelerometer values
-  setMode(); // set the mode (it might have changed)
+  if(!modeFreeze)
+  {
+    setMode(); // set the mode (it might have changed)
+  }  
   expressBehaviour(); // express a behaviour based on environment
   handleMessaging(); // exchanges messages with the nodes
 	if(inDebugMode)
@@ -159,33 +171,35 @@ void debug()
 		//Serial << "oH: " << oldHue << " pH: " << plannedHue << " cH: " << currentHue << "\n";
 		Serial << "m=" << mode << " n=" << nrNodesConnected << " c" << currentNode << "=" << COMMANDS[currentNode-1] << "\n";
 	}
-	Serial << "x: " << accXavarage << "-" << accValue_x << "\t y:" << accYavarage << "-" << accValue_y <<  "\t z:" << accZavarage << "-" << accValue_z << "\n";
+	//Serial << "x: " << accXavarage << "-" << accValue_x << "\t y:" << accYavarage << "-" << accValue_y <<  "\t z:" << accZavarage << "-" << accValue_z << "\n";
 }
 
 
 void updateAcc()
 {
-  accValue_x = analogRead(PIN_ACC_X);
+  accValue_x = analogRead(PIN_ACC_X); // update the accelerometer values
   accValue_y = analogRead(PIN_ACC_Y);
   accValue_z = analogRead(PIN_ACC_Z);
-  accXList[accListIndex]   = accValue_x;
+  accXList[accListIndex]   = accValue_x; // store the new values in a list
   accYList[accListIndex]   = accValue_y;
   accZList[accListIndex++] = accValue_z;
-  if(accListIndex == accListLength) 
+  if(accListIndex == accListLength)
   {
+    // reset the list index if the end of the list is reached
     accListIndex = 0; 
-    accInitialized = true; 
+    accInitialized = true; // this value is set to true to make sure that the ismoving check waits before the list was filled for the first time
   }
-  int accXSum = 0;
+  int accXSum = 0; // create sumvars for all the accelerometer direction
   int accYSum = 0;
   int accZSum = 0;
   for(int i=0; i<accListLength; i++)
   {
-    accXSum += accXList[i];
+    // calculate the sums for x, y and z
+    accXSum += accXList[i]; 
     accYSum += accYList[i];
     accZSum += accZList[i];
   }
-  accXavarage = accXSum/accListLength;
+  accXavarage = accXSum/accListLength; // calculate the avarage of all the values in the list
   accYavarage = accYSum/accListLength;
   accZavarage = accZSum/accListLength;
 }
@@ -193,28 +207,41 @@ void updateAcc()
 bool isMoving(int difference)
 {
   bool moving = false;
-  if(accInitialized)
+  if(!networkNode) // networknodes never move (even if they do, it can't be measured since they have no accelerometer)
   {
-    moving = abs(accXavarage - accValue_x) > difference || abs(accYavarage - accValue_y) > difference || abs(accZavarage - accValue_z) > difference;
-  }
-  if(moving)
-  {
-    lastMovingTime = currentTime;
+    if(accInitialized)
+    {
+      // if the list with x, y and z values was filled at least once
+      // the ledwork is moving if the current x, y or z differs vor at least 'difference' from the average
+      moving = abs(accXavarage - accValue_x) > difference || abs(accYavarage - accValue_y) > difference || abs(accZavarage - accValue_z) > difference;
+    }
+    if(moving)
+    {
+      lastMovingTime = currentTime; // set the last time the ledwork has moves
+    }
+    else
+    {
+      lastStopMovingTime = currentTime; // set the last time the ledwork didn't move
+    }
   }
   return moving;
 }
 
 bool isMoving()
 {
-  return isMoving(4);
+  return isMoving(6); // check movement with a difference of 6
 }
 
 bool isHeavyMoving()
 {
-  bool moving = isMoving(6);
+  bool moving = isMoving(8);
   if(moving)
   {
     lastHeavyMovingTime = currentTime;
+  }
+  else
+  {
+    lastStopHeavyMovingTime = currentTime;
   }
   return moving;
 }
@@ -222,10 +249,9 @@ bool isHeavyMoving()
 void setMode()
 {
   // set the mode if nessecery
-  char oldMode = mode; // save the oldmode for later
-  if(nrNodesConnected > 0)
+  if(mode != MODE_ATTACHED && nrNodesConnected > 0)
 	{
-		mode = MODE_ATTACHED;
+		changeMode(MODE_ATTACHED, true);
 	}
 	else
 	{
@@ -234,15 +260,28 @@ void setMode()
       case MODE_ATTACHED:
 		    if(nrNodesConnected == 0)
 			  {
-				  mode = MODE_DEFAULT;
+				  changeMode(MODE_DEFAULT, true);
 			  }
         break;
       case MODE_MOVING:
-      case MODE_HEAVYMOVING:
-        if(!isMoving() && currentTime - lastMovingTime > 2000)
+        if((currentTime - modeChangeTime) > 500 && isHeavyMoving())
+        {
+          changeMode(MODE_HEAVYMOVING, true);
+        }
+        else if(!isMoving() && currentTime - lastMovingTime > 2000)
         {
 				  // the ledwork stopt moving and it has been more than two seconds since it started moving, return to defaultmode
-          mode = MODE_DEFAULT;
+          changeMode(MODE_DEFAULT, true);
+        }
+        break;
+      case MODE_HEAVYMOVING:
+        if(!isHeavyMoving() && (currentTime - lastHeavyMovingTime) > 100)
+        {
+          changeMode(MODE_MOVING, true);
+        }
+        else if((currentTime - modeChangeTime) > 1900)
+        {
+          changeMode(MODE_TURNHUE, true);
         }
         break;
       case MODE_TURNHUE:
@@ -251,16 +290,28 @@ void setMode()
       default:
         if(isMoving())
         {
-          mode = MODE_MOVING; 
+          changeMode(MODE_MOVING, true); 
         }
         break;
     } 
   }
-  if(oldMode != mode)
+}
+
+void changeMode(char newMode, bool setNewConditions)
+{
+  if(!modeFreeze) // if the mode is freezed the ledwork is prohibited from changing it
   {
-		// the mode has changed
-    modeChangeTime = currentTime; // set the time the mode was changed to current
-    setNewModeConditions(); // set environment variables based on the new mode
+    char oldMode = mode; // save the oldmode for later
+    mode = newMode;
+    if(oldMode != mode)
+    {
+		  // the mode has changed
+      modeChangeTime = currentTime; // set the time the mode was changed to current
+      if(setNewConditions)
+      {
+        setNewModeConditions(); // set environment variables based on the new mode
+      }
+    }
   }
 }
 
@@ -270,13 +321,13 @@ void setNewModeConditions()
   switch(mode)
   {
     case MODE_ATTACHED:
-      plannedSaturationMin = 150;
+      plannedSaturationMin = 255; //150;
       plannedSaturationMax = 255;
-      plannedBrightnessMin = 150;
+      plannedBrightnessMin = 255; //150;
       plannedBrightnessMax = 255;
-      hueRangeLength = 10;
-      hueIntervalMin = 100;
-      hueIntervalMax = 2000;
+      hueRangeLength = networkNode ? 40 : 0;
+      hueIntervalMin = networkNode ? 100 : 100;
+      hueIntervalMax = networkNode ? 3000 : 1000;
 			saturationIntervalMin = 100;
       saturationIntervalMax = 2000;
       brightnessIntervalMin = 100;
@@ -287,31 +338,33 @@ void setNewModeConditions()
       break;  
     case MODE_MOVING:
       //setColorDomain(); // pick a new color domain (keep things random)
-      plannedSaturationMin = 150;
+      plannedSaturationMin = 255;
       plannedSaturationMax = 255;
-      plannedBrightnessMin = 150;
+      plannedBrightnessMin = 255;
       plannedBrightnessMax = 255;
-      hueIntervalMin = 100;
-      hueIntervalMax = 500;
+      hueIntervalMin = 50;
+      hueIntervalMax = 300;
 			saturationIntervalMin = 100;
       saturationIntervalMax = 500;
-      brightnessIntervalMin = 100;
-      brightnessIntervalMax = 500;
-      pulsing = true;
+      brightnessIntervalMin = 50;
+      brightnessIntervalMax = 200;
+      brightnessChangeStart = 0;
+      pulsing = false;
+      newHue();
       break;
     case MODE_TURNHUE:
       lastHueChangeByTurnTime = currentTime;
       break;
     case MODE_DEFAULT:
     default:
-      setColorDomain(); // pick a color domain in HSB
-      plannedSaturationMin = 150;
+      //setColorDomain(); // pick a color domain in HSB
+      plannedSaturationMin = 200;
       plannedSaturationMax = 255;
-      plannedBrightnessMin = 150;
-      plannedBrightnessMax = 255;
-      hueRangeLength = 80;
-      hueIntervalMin = 1000;
-      hueIntervalMax = 10000;
+      plannedBrightnessMin = 200;
+      plannedBrightnessMax = 240;
+      hueRangeLength = 60;
+      hueIntervalMin = 800;
+      hueIntervalMax = 8000;
 			saturationIntervalMin = 2000;
       saturationIntervalMax = 5000;
       brightnessIntervalMin = 2000;
@@ -324,6 +377,7 @@ void setNewModeConditions()
 
 void expressBehaviour()
 {
+  // based on the mode, express a certain behaviour
   switch(mode)
   {
     case MODE_ATTACHED:
@@ -346,20 +400,28 @@ void expressBehaviour()
 
 void expressBehavior_default()
 {
-  if(currentTime - modeChangeTime > 5000)
-  { 
-    plannedBrightnessMin = 100;
-    plannedBrightnessMax = 200;
-  }
-  if(currentTime - modeChangeTime > 10000)
-  { 
-    plannedBrightnessMin = 50;
-    plannedBrightnessMax = 150;
-  }
-  if(currentTime - modeChangeTime > 20000)
-  { 
-    plannedBrightnessMin = 10;
-    plannedBrightnessMax = 50;
+  if(!networkNode) // network nodes are constantly connceted to power, so power saving options can be ignored
+  {
+    if(currentTime - modeChangeTime > 10000)
+    { 
+      plannedBrightnessMin = 150;
+      plannedBrightnessMax = 200;
+    }
+    if(currentTime - modeChangeTime > 30000)
+    { 
+      plannedBrightnessMin = 100;
+      plannedBrightnessMax = 150;
+    }
+    if(currentTime - modeChangeTime > 120000)
+    { 
+      plannedBrightnessMin = 50;
+      plannedBrightnessMax = 100;
+    }
+    if(currentTime - modeChangeTime > 600000)
+    { 
+      plannedBrightnessMin = 10;
+      plannedBrightnessMax = 50;
+    }
   }
   setHSBIntervals();
   updateHSB();
@@ -368,99 +430,147 @@ void expressBehavior_default()
 
 void expressBehavior_moving()
 {
-  if((currentTime - modeChangeTime) > 500 && isHeavyMoving())
-  {
-    mode = MODE_HEAVYMOVING;
-    modeChangeTime = currentTime;
-  }
-  setHSBIntervals();
-  updateHSB(); 
-  currentBrightness = 255;
-  currentSaturation = 0;
+  currentBrightness = 255; // full brightness
+  currentSaturation = 255; // full saturation
+  currentHue = hueRangeStart + (hueRangeLength/2); // hue is in the center of its range
+  hueInterval = 0; // reset the intervals so that the ledwork will slowly go back into fading mode
+  saturationInterval = 0;
+  brightnessInterval = 0;
   outPutMappedLightValues();
 }
 
 void expressBehavior_heavymoving()
 {
-  if(!isHeavyMoving() && (currentTime - lastHeavyMovingTime) > 100)
+  if((currentTime - modeChangeTime) > 1800)
   {
-    mode = MODE_MOVING;
-    modeChangeTime = currentTime;
-  }
-  else if((currentTime - modeChangeTime) > 4100)
-  {
-    mode = MODE_TURNHUE;
-    modeChangeTime = currentTime;
-    setNewModeConditions();
-  }
-  else if((currentTime - modeChangeTime) > 4000)
-  {
+    // white
     digitalWrite(PIN_LIGHT_RED,   HIGH);
     digitalWrite(PIN_LIGHT_GREEN, HIGH);
     digitalWrite(PIN_LIGHT_BLUE,  HIGH);
   }
-  else if((currentTime - modeChangeTime) > 3000)
+  else if((currentTime - modeChangeTime) > 1200)
   {
+    // red
     digitalWrite(PIN_LIGHT_RED,   HIGH);
     digitalWrite(PIN_LIGHT_GREEN, LOW);
     digitalWrite(PIN_LIGHT_BLUE,  LOW);
   }
-  else if((currentTime - modeChangeTime) > 2000)
+  else if((currentTime - modeChangeTime) > 800)
   {
+    // green
     digitalWrite(PIN_LIGHT_RED,   LOW);
     digitalWrite(PIN_LIGHT_GREEN, HIGH);
     digitalWrite(PIN_LIGHT_BLUE,  LOW);
   }
-  else if((currentTime - modeChangeTime) > 1000)
+  else if((currentTime - modeChangeTime) > 200)
   {
+    // blue
     digitalWrite(PIN_LIGHT_RED,   LOW);
     digitalWrite(PIN_LIGHT_GREEN, LOW);
     digitalWrite(PIN_LIGHT_BLUE,  HIGH);
+  }
+  else
+  {
+    // keep doing the normal moving behaviour for a short while (prevent anoying flashing);
+    expressBehavior_moving();
   }
 }
 
 void expressBehaviour_turnhue()
 {
-  float checkHue = currentHue;
-  if(currentTime - lastHueChangeByTurnTime < 5000)
+  modeFreeze = true;
+  if(currentTime - lastHueChangeByTurnTime < 1200)
   {
-    //mode = MODE_DEFAULT;
-    //modeChangeTime = currentTime;
-    currentHue        = plannedHue        = oldHue        = map(accXavarage, 410, 690, 0, 255);
+    float check_oldHue = currentHue;
+    float check_newHue;
+    check_newHue                                          = mapFloat(accValue_x,  410, 690, 0, 255);
+    currentHue        = plannedHue        = oldHue        = mapFloat(accXavarage, 410, 690, 0, 255);
     currentSaturation = plannedSaturation = oldSaturation = 255;
     currentBrightness = plannedBrightness = oldBrightness = 255;
     hueRangeStart = currentHue - (hueRangeLength/2);
     hueChangeStart = saturationChangeStart = brightnessChangeStart = 0;
+    float difference = check_oldHue - check_newHue;
+    if(abs(difference) > 3)
+    {
+      lastHueChangeByTurnTime = currentTime;
+    }
   }
-  if(abs(checkHue - currentHue) > 2)
+  else
   {
-    lastHueChangeByTurnTime = currentTime;
+    if(isHeavyMoving())
+    {
+      if(endOfTurnHue == 0)
+      {
+        // set the endOfHueTurb timer
+        endOfTurnHue = currentTime;
+      }
+      if((currentTime - endOfTurnHue) < 400)
+      {
+        // red
+        digitalWrite(PIN_LIGHT_RED,   HIGH);
+        digitalWrite(PIN_LIGHT_GREEN, LOW);
+        digitalWrite(PIN_LIGHT_BLUE,  LOW);
+      }
+      else if((currentTime - endOfTurnHue) < 300)
+      {
+        // green
+        digitalWrite(PIN_LIGHT_RED,   LOW);
+        digitalWrite(PIN_LIGHT_GREEN, HIGH);
+        digitalWrite(PIN_LIGHT_BLUE,  LOW);
+      }
+      else if((currentTime - endOfTurnHue) < 200)
+      {
+        // blue
+        digitalWrite(PIN_LIGHT_RED,   LOW);
+        digitalWrite(PIN_LIGHT_GREEN, LOW);
+        digitalWrite(PIN_LIGHT_BLUE,  HIGH);
+      }
+      else if(currentTime - endOfTurnHue < 100)
+      {
+        currentSaturation = plannedSaturation = oldSaturation = 0;
+        currentBrightness = plannedBrightness = oldBrightness = 255;
+      }
+      else
+      {
+        endOfTurnHue = 0;
+        modeFreeze = false;
+        changeMode(MODE_DEFAULT, true);
+      }
+    }
+    else
+    {
+      endOfTurnHue == 0;
+    }
   }
   outPutMappedLightValues();
 }
 
 void expressBehavior_attached()
 {
-  bool notComfi; // @TODO:  will this work as expected? it is set to null in every loop...
+  if(networkNode && (currentTime - modeChangeTime) > 20000)
+  {
+    setColorDomain; // if this is a networknode, set a new colorscheme every 20 seconds
+  }
   if((currentTime - modeChangeTime) < 500)
   {
     setHSBIntervals();
     updateHSB(); 
     currentBrightness = 255;
     currentSaturation = 0;
-    notComfi = true;
+    comfortablyAttached = true;
   }
   else
   {
-    if(notComfi)
+    if(comfortablyAttached)
     {
       newSaturation();
       newBrightness();
-      notComfi = false;
+      comfortablyAttached = false;
     }
     setHSBIntervals();
     updateHSB();
-	  hueRangeStart = getAverageHueFromNodes(false); //nrNodesConnected <= 1);
+	  //hueRangeStart = getAverageHueFromNodes(nrNodesConnected <= 1); // - (hueRangeLength/2);
+    hueRangeStart = getAverageHueFromNodes(false); // - (hueRangeLength/2);
     //currentHue = getAverageHueFromNodes(false);
   }
   outPutMappedLightValues();
@@ -595,12 +705,12 @@ void setRGBFromCurrentHSB()
 void handleMessaging()
 {
   // send a command every 100 ms
-  if(currentTime - messageSendTime >= 20)
+  if(currentTime - messageSendTime >= 25)
   {
     sendMessage();
   }
   // read a node message every 200 ms or when skipToNextNode == true
-  if(skipToNextNode || ((messageReadTime == 0) || (currentTime - messageReadTime > 40)))
+  if(skipToNextNode || ((messageReadTime == 0) || (currentTime - messageReadTime > 50)))
   {
     Serial.flush(); //flush the serial buffer so that other nodes will not "steal" bytes from other nodes 
     // if the ledwork hasn't read a command in previous step, that nodes wasn't connected (at least not good enough)
@@ -633,10 +743,8 @@ void sendMessage()
 
 void calculateCommand()
 {
-  char command[COMMAND_LENGTH] = {(char)makeCommandCharValid(currentHue), 
-                                  (char)makeCommandCharValid(currentSaturation), 
-                                  (char)makeCommandCharValid(currentBrightness),  
-                                  (char)(nrNodesConnected + 4)};
+  char command[COMMAND_LENGTH] = {(char)makeCommandCharValid(currentHue)};
+                                  //(char)(nrNodesConnected + 4)};
 	strcpy(COMMAND_CALCULATED, command);
 }
 
@@ -728,9 +836,18 @@ void outPutMappedLightValues()
 
 void updateHSB()
 {
-  currentHue =        getMappedValueIntervalBased(hueChangeStart,        hueInterval,        pulsing, plannedHue,        oldHue);
-	currentSaturation = getMappedValueIntervalBased(saturationChangeStart, saturationInterval, pulsing, plannedSaturation, oldSaturation);
-  currentBrightness = getMappedValueIntervalBased(brightnessChangeStart, brightnessInterval, pulsing, plannedBrightness, oldBrightness);
+  if(plannedHue != currentHue)
+  {
+    currentHue =       getMappedValueIntervalBased(hueChangeStart,        hueInterval,        true, plannedHue,        oldHue);
+  }
+  if(plannedSaturation != currentSaturation)
+  {
+	  currentSaturation = getMappedValueIntervalBased(saturationChangeStart, saturationInterval, true, plannedSaturation, oldSaturation);
+	}
+	if(plannedBrightness != currentBrightness)
+	{
+    currentBrightness = getMappedValueIntervalBased(brightnessChangeStart, brightnessInterval, pulsing, plannedBrightness, oldBrightness);
+  }
 }
 
 void outputMappedLightValue(int outputPin, float mappedValue)
@@ -758,7 +875,7 @@ void updateNrNodesConnected()
 float getMappedValueIntervalBased(float startTime, int interval, bool fade, float minValue, float maxValue)
 {
   float currentStep = (currentTime - startTime) / interval;
-  return fade ? mapFloat(currentStep, 0, 1, maxValue, minValue) : (currentStep > 0.5 ? HIGH : LOW);
+  return fade ? mapFloat(currentStep, 0, 1, maxValue, minValue) : (currentStep > 0.5 ? minValue : maxValue);
 }
 
 float mapFloat(float x, float in_min, float in_max, float out_min, float out_max)
